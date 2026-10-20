@@ -1636,7 +1636,7 @@ var EN_MESSAGES = {
     objective: "The concrete objective to start pursuing.",
     modelObjective: "The model-formulated concrete objective to start pursuing.",
     updatedObjective: "The updated concrete objective.",
-    tokenBudget: "Optional positive token budget.",
+    tokenBudget: "Optional positive token budget; ignored when the operator sets allow_token_budget to false.",
     maxAutoTurns: "Optional per-goal auto-continue limit.",
     maxDurationSeconds: "Optional per-goal duration limit.",
     editStatus: "Whether the edited goal should be active or paused.",
@@ -1723,7 +1723,7 @@ var ZH_CN_MESSAGES = {
     objective: "\u8981\u5F00\u59CB\u6267\u884C\u7684\u5177\u4F53\u76EE\u6807\u3002",
     modelObjective: "\u7531\u6A21\u578B\u5236\u5B9A\u3001\u8981\u5F00\u59CB\u6267\u884C\u7684\u5177\u4F53\u76EE\u6807\u3002",
     updatedObjective: "\u66F4\u65B0\u540E\u7684\u5177\u4F53\u76EE\u6807\u3002",
-    tokenBudget: "\u53EF\u9009\u7684\u6B63\u6570 token \u9884\u7B97\u3002",
+    tokenBudget: "\u53EF\u9009\u7684\u6B63\u6570 token \u9884\u7B97\uFF1B\u5F53 allow_token_budget \u8BBE\u4E3A false \u65F6\u5FFD\u7565\u3002",
     maxAutoTurns: "\u53EF\u9009\u7684\u5355\u76EE\u6807\u81EA\u52A8\u7EE7\u7EED\u6B21\u6570\u4E0A\u9650\u3002",
     maxDurationSeconds: "\u53EF\u9009\u7684\u5355\u76EE\u6807\u6301\u7EED\u65F6\u95F4\u4E0A\u9650\u3002",
     editStatus: "\u7F16\u8F91\u540E\u7684\u76EE\u6807\u5E94\u5904\u4E8E active \u8FD8\u662F paused \u72B6\u6001\u3002",
@@ -3315,10 +3315,11 @@ async function createGoalFromTool(input, context, services) {
   const existing = await getGoal(context.sessionID);
   if (existing && !isClosedGoal(existing))
     return existingGoalResult(existing, objective, planningOnly, services);
+  const tokenBudget = services.options.allow_token_budget === false ? null : input.token_budget ?? services.options.default_token_budget ?? null;
   let goal;
   try {
     goal = await createGoal(context.sessionID, input.objective, {
-      tokenBudget: input.token_budget ?? services.options.default_token_budget ?? null,
+      tokenBudget,
       maxAutoTurns: input.max_auto_turns ?? null,
       maxDurationSeconds: input.max_duration_seconds ?? services.options.max_goal_duration_seconds ?? null,
       noProgressTokenThreshold: services.options.no_progress_token_threshold ?? null,
@@ -3355,8 +3356,9 @@ async function clearGoalFromTool(context, services) {
 }
 async function replaceGoalFromTool(input, context, services) {
   const planningOnly = services.isPlanAgent(context.agent);
+  const tokenBudget = services.options.allow_token_budget === false ? null : input.token_budget ?? services.options.default_token_budget ?? null;
   const result = await replaceGoal(context.sessionID, input.objective, {
-    tokenBudget: input.token_budget ?? services.options.default_token_budget ?? null,
+    tokenBudget,
     maxAutoTurns: input.max_auto_turns ?? null,
     maxDurationSeconds: input.max_duration_seconds ?? services.options.max_goal_duration_seconds ?? null,
     noProgressTokenThreshold: services.options.no_progress_token_threshold ?? null,

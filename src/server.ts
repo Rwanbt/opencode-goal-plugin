@@ -57,6 +57,7 @@ type Options = {
   command_name?: string
   locale?: string
   default_token_budget?: number
+  allow_token_budget?: boolean
   max_goal_duration_seconds?: number
   no_progress_token_threshold?: number
   max_no_progress_turns?: number
@@ -1297,10 +1298,18 @@ async function createGoalFromTool(input: CreateGoalArgs, context: ToolExecContex
   const existing = await getGoal(context.sessionID)
   if (existing && !isClosedGoal(existing)) return existingGoalResult(existing, objective, planningOnly, services)
 
+  // Token budgets are opt-in at the operator level. When disabled, an agent
+  // that speculatively passes token_budget must not be able to stop a
+  // long-running goal: the goal is created unlimited instead.
+  const tokenBudget =
+    services.options.allow_token_budget === false
+      ? null
+      : input.token_budget ?? services.options.default_token_budget ?? null
+
   let goal: GoalSnapshot
   try {
     goal = await createGoal(context.sessionID, input.objective, {
-      tokenBudget: input.token_budget ?? services.options.default_token_budget ?? null,
+      tokenBudget,
       maxAutoTurns: input.max_auto_turns ?? null,
       maxDurationSeconds: input.max_duration_seconds ?? services.options.max_goal_duration_seconds ?? null,
       noProgressTokenThreshold: services.options.no_progress_token_threshold ?? null,
@@ -1338,8 +1347,12 @@ async function clearGoalFromTool(context: ToolExecContext, services: GoalService
 
 async function replaceGoalFromTool(input: CreateGoalArgs, context: ToolExecContext, services: GoalServices) {
   const planningOnly = services.isPlanAgent(context.agent)
+  const tokenBudget =
+    services.options.allow_token_budget === false
+      ? null
+      : input.token_budget ?? services.options.default_token_budget ?? null
   const result = await replaceGoal(context.sessionID, input.objective, {
-    tokenBudget: input.token_budget ?? services.options.default_token_budget ?? null,
+    tokenBudget,
     maxAutoTurns: input.max_auto_turns ?? null,
     maxDurationSeconds: input.max_duration_seconds ?? services.options.max_goal_duration_seconds ?? null,
     noProgressTokenThreshold: services.options.no_progress_token_threshold ?? null,

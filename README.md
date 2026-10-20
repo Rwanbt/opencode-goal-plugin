@@ -190,7 +190,8 @@ Defaults:
 - `max_consecutive_failures`: `3`; explicit name for the same ceiling. When both are set, `max_consecutive_failures` wins and `max_prompt_failures` remains a backwards-compatible alias.
 - `retry_backoff_base_ms`: `1000`; base delay for exponential backoff between consecutive retry attempts after a failed continuation. Set `0` to disable backoff and retry at `min_continue_interval_seconds` only.
 - `retry_max_delay_ms`: `60000`; upper bound for the exponential retry backoff.
-- `default_token_budget`: unset by default; when set, new goals inherit this token budget.
+- `default_token_budget`: unset by default; when set and `allow_token_budget` is not `false`, new goals inherit this token budget.
+- `allow_token_budget`: `true`; when set to `false`, the plugin ignores both `token_budget` and `default_token_budget`, so goals are always unlimited in tokens. Use this for long autonomous runs where an agent may speculatively add a budget that would stop the goal early.
 - `max_goal_duration_seconds`: unset by default; when set, new goals inherit this elapsed-time safety limit.
 - `no_progress_token_threshold`: `50`; output-token floor used to judge whether a goal continuation turn made progress.
 - `max_no_progress_turns`: `2`; consecutive low-progress goal continuation turns before pausing. Only turns produced by a reserved goal continuation count — ordinary low-output assistant messages (for example short tool-call-only turns from PTY or status checks) never increment this counter.

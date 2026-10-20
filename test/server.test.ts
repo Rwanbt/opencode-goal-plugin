@@ -507,6 +507,25 @@ test("duplicate limited goals retain the safety stop notice", async () => {
   expect(String(duplicate)).toContain("Safety limit reached")
 })
 
+test("allow_token_budget false ignores an explicit token budget", async () => {
+  const hooks = await setupServer(
+    { client: { session: { promptAsync: async () => {} } } } as never,
+    { auto_continue: false, allow_token_budget: false },
+  )
+  const tools = hooks.tool!
+  const context = { sessionID: "ses_1" } as never
+
+  const created = await requireTool(tools.create_goal, "create_goal").execute(
+    { objective: "unlimited autonomous task", token_budget: 10 },
+    context,
+  )
+
+  expect(String(created)).toContain('"tokenBudget": null')
+  await accountUsage("ses_1", 10_000)
+  const read = await requireTool(tools.get_goal, "get_goal").execute({}, context)
+  expect(String(read)).toContain('"status": "active"')
+})
+
 test("server plugin registers goal, pause_goal, and resume_goal as desktop/web commands by default", async () => {
   const hooks = await setupServer(
     {

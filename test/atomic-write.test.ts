@@ -549,12 +549,18 @@ test("rename retry exhaustion fails, preserves the old file, and cleans the temp
     "rename",
     "sleep",
     "rename",
+    "sleep",
+    "rename",
+    "sleep",
+    "rename",
     "unlink",
   ])
-  // Backoff grows per attempt: 20ms then 40ms.
+  // Backoff doubles per attempt: 20ms, 40ms, 80ms, 160ms.
   expect(allArgsFor("sleep").map((args) => args[0])).toEqual([
     RENAME_RETRY_DELAY_MS,
     RENAME_RETRY_DELAY_MS * 2,
+    RENAME_RETRY_DELAY_MS * 4,
+    RENAME_RETRY_DELAY_MS * 8,
   ])
   // The old file survived and the temp file was cleaned up.
   expect(await readFile(file, "utf8")).toBe("old state")

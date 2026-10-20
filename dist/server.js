@@ -356,7 +356,7 @@ var defaultAtomicWriteOps = {
   syncDir: (dir, platform) => syncDirectory(dir, defaultDirOpenOps, platform),
   sleep: defaultSleep
 };
-var RENAME_ATTEMPTS = 3;
+var RENAME_ATTEMPTS = 5;
 var RENAME_RETRY_DELAY_MS = 20;
 async function renameWithRetry(ops, from, to) {
   let attempt = 0;
@@ -368,7 +368,7 @@ async function renameWithRetry(ops, from, to) {
       attempt += 1;
       if (!isTransientRenameError(error, ops.platform) || attempt >= RENAME_ATTEMPTS)
         throw error;
-      const delay = RENAME_RETRY_DELAY_MS * attempt;
+      const delay = RENAME_RETRY_DELAY_MS * 2 ** (attempt - 1);
       await ops.sleep(delay);
     }
   }

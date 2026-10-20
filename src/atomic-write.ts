@@ -176,9 +176,9 @@ export const defaultAtomicWriteOps: AtomicWriteOps = {
 }
 
 /** Total rename attempts for transient Windows replacement errors. */
-export const RENAME_ATTEMPTS = 3
+export const RENAME_ATTEMPTS = 5
 
-/** Base backoff between rename retries (multiplied by the attempt number). */
+/** Base backoff between rename retries (doubles after each attempt). */
 export const RENAME_RETRY_DELAY_MS = 20
 
 async function renameWithRetry(ops: AtomicWriteOps, from: string, to: string): Promise<void> {
@@ -192,7 +192,7 @@ async function renameWithRetry(ops: AtomicWriteOps, from: string, to: string): P
       // A non-transient error fails immediately; transient errors get a small,
       // bounded number of attempts (renaming over a briefly-locked target).
       if (!isTransientRenameError(error, ops.platform) || attempt >= RENAME_ATTEMPTS) throw error
-      const delay = RENAME_RETRY_DELAY_MS * attempt
+      const delay = RENAME_RETRY_DELAY_MS * 2 ** (attempt - 1)
       await ops.sleep(delay)
     }
   }

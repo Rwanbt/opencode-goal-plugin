@@ -1,9 +1,9 @@
 import { afterAll, beforeAll, beforeEach, expect, setSystemTime, spyOn, test } from "bun:test"
 import { mkdtempSync, rmSync, unlinkSync } from "node:fs"
-import { rename, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { testRender } from "@opentui/solid"
+import { atomicWriteFile } from "../src/atomic-write.ts"
 import plugin, { formatDuration, formatGoal, goalStateFromSession, liveTimeUsedSeconds, readPersistedGoal } from "../src/tui.ts"
 import { messagesFor } from "../src/i18n"
 
@@ -12,9 +12,9 @@ const isolatedStateDir = mkdtempSync(join(tmpdir(), "goal-tui-v1-"))
 const isolatedStatePath = join(isolatedStateDir, "goals.json")
 
 async function writeGoalState(value: unknown) {
-  const temporary = `${isolatedStatePath}.tmp`
-  await writeFile(temporary, JSON.stringify(value))
-  await rename(temporary, isolatedStatePath)
+  // Use the production atomic writer so its bounded Windows rename retries also
+  // protect the test helper from transient EPERM while the TUI is reading.
+  await atomicWriteFile(isolatedStatePath, JSON.stringify(value))
 }
 
 beforeAll(() => {

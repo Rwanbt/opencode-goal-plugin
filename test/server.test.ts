@@ -3102,7 +3102,7 @@ test("auto-continue retries are bounded: three failed attempts, no fourth", asyn
         },
       },
     } as never,
-    { auto_continue: true, max_auto_turns: 10, min_continue_interval_seconds: 0, max_prompt_failures: 3 },
+    { auto_continue: true, max_auto_turns: 10, min_continue_interval_seconds: 0, max_prompt_failures: 3, retry_backoff_base_ms: 0 },
   )
   const tools = hooks.tool
   if (!tools) throw new Error("expected goal tools to be registered")
@@ -3118,6 +3118,48 @@ test("auto-continue retries are bounded: three failed attempts, no fourth", asyn
   expect(String(read)).toContain('"continuationFailures": 3')
   expect(String(read)).toContain('"autoTurns": 3')
   expect(logs).toHaveLength(3)
+})
+
+test("failed continuation retries wait for exponential backoff", async () => {
+  const failures: number[] = []
+  const hooks = await setupServer(
+    {
+      client: {
+        app: { log: async () => failures.push(Date.now()) },
+        session: {
+          promptAsync: async () => {
+            throw new Error("network down")
+          },
+        },
+      },
+    } as never,
+    {
+      auto_continue: true,
+      max_auto_turns: 10,
+      min_continue_interval_seconds: 0,
+      max_prompt_failures: 3,
+      retry_backoff_base_ms: 300,
+      retry_max_delay_ms: 5_000,
+    },
+  )
+  const tools = hooks.tool
+  if (!tools) throw new Error("expected goal tools to be registered")
+
+  await requireTool(tools.create_goal, "create_goal").execute({ objective: "keep going" }, { sessionID: "ses_1" } as never)
+  await hooks.event!({ event: { type: "session.idle", properties: { sessionID: "ses_1" } } as never })
+
+  await waitForLong(() => failures.length === 1, 2_000)
+  const firstFailureAt = failures[0]!
+  // The first retry must respect the 300ms base backoff.
+  await new Promise((resolve) => setTimeout(resolve, 150))
+  expect(failures).toHaveLength(1)
+  await waitForLong(() => failures.length === 2, 2_000)
+  expect(failures[1]! - firstFailureAt).toBeGreaterThanOrEqual(280)
+  // The second retry doubles the delay (600ms), so it must not fire at the
+  // previous 300ms cadence.
+  await new Promise((resolve) => setTimeout(resolve, 350))
+  expect(failures).toHaveLength(2)
+  await waitForLong(() => failures.length === 3, 3_000)
 })
 
 test("failed continuation retries wait for the configured minimum interval", async () => {

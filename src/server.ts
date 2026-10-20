@@ -50,6 +50,9 @@ type Options = {
   max_turn_time?: number
   max_task_block_seconds?: number
   max_prompt_failures?: number
+  max_consecutive_failures?: number
+  retry_backoff_base_ms?: number
+  retry_max_delay_ms?: number
   register_command?: boolean
   command_name?: string
   locale?: string
@@ -81,9 +84,14 @@ type UpdateGoalArgs =
       blocker?: string
     }
 
-const DEFAULT_MAX_AUTO_TURNS = 25
+// null means "no default global cap": a goal keeps auto-continuing until the
+// user stops it, the token budget is exhausted, or the plan is complete.
+// Callers can still opt into a per-goal or per-plugin limit explicitly.
+const DEFAULT_MAX_AUTO_TURNS: number | null = null
 const DEFAULT_CONTINUE_INTERVAL_SECONDS = 3
-const DEFAULT_MAX_PROMPT_FAILURES = 3
+const DEFAULT_MAX_CONSECUTIVE_FAILURES = 3
+const DEFAULT_RETRY_BACKOFF_BASE_MS = 1_000
+const DEFAULT_RETRY_MAX_DELAY_MS = 60_000
 const DEFAULT_COMMAND_NAME = "goal"
 const DEFAULT_RESTRICTED_AGENTS = ["plan"]
 const TASK_SETTLE_DELAY_MS = 25
@@ -588,9 +596,24 @@ function transportErrorMessageFromEvent(props: Record<string, unknown>) {
 }
 
 // Retry after the remaining minimum interval measured from the attempt's
-// millisecond anchor. The public lastContinuationAt field remains in seconds.
-function continuationRetryDelayMs(minIntervalSeconds: number, attemptAt: number, now = Date.now()) {
-  return Math.max(0, attemptAt + minIntervalSeconds * 1000 - now) + RETRY_SETTLE_MS
+// millisecond anchor, or after an exponential backoff once the same goal has
+// accumulated consecutive failures. The public lastContinuationAt field
+// remains in seconds. A zero base disables backoff and keeps the historical
+// minimum-interval behaviour.
+function continuationRetryDelayMs(
+  minIntervalSeconds: number,
+  attemptAt: number,
+  failureCount = 0,
+  backoffBaseMs = 0,
+  backoffMaxMs = 0,
+  now = Date.now(),
+) {
+  const minDelay = Math.max(0, attemptAt + minIntervalSeconds * 1000 - now)
+  const exponentialDelay =
+    failureCount > 0 && backoffBaseMs > 0
+      ? Math.min(backoffBaseMs * 2 ** (failureCount - 1), backoffMaxMs > 0 ? backoffMaxMs : Number.POSITIVE_INFINITY)
+      : 0
+  return Math.max(minDelay, exponentialDelay) + RETRY_SETTLE_MS
 }
 
 function continuationDelayFromSnapshot(minIntervalSeconds: number, lastContinuationAt: number | null, now = Date.now()) {
@@ -1526,7 +1549,14 @@ const server: Plugin = async ({ client }, options?: Options) => {
   const maxTaskBlockMs = timeoutMillisecondsFromSeconds(
     options?.max_task_block_seconds ?? DEFAULT_MAX_TASK_BLOCK_SECONDS,
   )
-  const maxPromptFailures = positiveIntegerOrNull(options?.max_prompt_failures) ?? DEFAULT_MAX_PROMPT_FAILURES
+  // max_consecutive_failures is the explicit name; keep max_prompt_failures as
+  // a backwards-compatible alias for existing configurations.
+  const maxConsecutiveFailures =
+    positiveIntegerOrNull(options?.max_consecutive_failures) ??
+    positiveIntegerOrNull(options?.max_prompt_failures) ??
+    DEFAULT_MAX_CONSECUTIVE_FAILURES
+  const retryBackoffBaseMs = nonNegativeIntegerOrNull(options?.retry_backoff_base_ms) ?? DEFAULT_RETRY_BACKOFF_BASE_MS
+  const retryMaxDelayMs = positiveIntegerOrNull(options?.retry_max_delay_ms) ?? DEFAULT_RETRY_MAX_DELAY_MS
   const registerCommand = options?.register_command ?? true
   const commandName = commandNameFromOptions(options)
   const locale = resolveLocale(options?.locale)
@@ -1674,7 +1704,7 @@ const server: Plugin = async ({ client }, options?: Options) => {
       // session is already inside a busy episode, so the pending attempt is
       // marked started immediately, and this busy episode rescues only once.
       if (!isCurrent()) return
-      const delivered = await recordContinuationResult(sessionID, "success", maxPromptFailures, {
+      const delivered = await recordContinuationResult(sessionID, "success", maxConsecutiveFailures, {
         armNoProgress: false,
         started: true,
         expectedGoalID: claimedGoalID,
@@ -1689,7 +1719,7 @@ const server: Plugin = async ({ client }, options?: Options) => {
         // transport errors accumulate toward max_prompt_failures without
         // consuming auto-turn budgets.
         if (claimedContinuation && isCurrent() && isTransportError(error)) {
-          await recordContinuationResult(sessionID, "failure", maxPromptFailures, { expectedGoalID: claimedGoalID })
+          await recordContinuationResult(sessionID, "failure", maxConsecutiveFailures, { expectedGoalID: claimedGoalID })
         }
         await client.app?.log?.({
           body: {
@@ -1886,7 +1916,7 @@ const server: Plugin = async ({ client }, options?: Options) => {
         if (!pendingReadyForFailure(attempt, deliveredLocally)) {
           return
         }
-        const afterFailure = await recordContinuationResult(sessionID, "failure", maxPromptFailures, {
+        const afterFailure = await recordContinuationResult(sessionID, "failure", maxConsecutiveFailures, {
           requirePending: true,
           expectedGoalID: current.id,
           expectedAttemptID: attempt.id,
@@ -1895,7 +1925,13 @@ const server: Plugin = async ({ client }, options?: Options) => {
         if (autoContinue && afterFailure?.status === "active") {
           scheduleSettledContinuation(
             sessionID,
-            continuationRetryDelayMs(minInterval, attempt.reservedAt),
+            continuationRetryDelayMs(
+              minInterval,
+              attempt.reservedAt,
+              afterFailure?.continuationFailures ?? 0,
+              retryBackoffBaseMs,
+              retryMaxDelayMs,
+            ),
             true,
             "retry",
           )
@@ -1943,7 +1979,7 @@ const server: Plugin = async ({ client }, options?: Options) => {
       }
       // Commit the delivered attempt. A busy that raced the resolution already
       // marked it started (started=true is preserved).
-      const delivered = await recordContinuationResult(sessionID, "success", maxPromptFailures, {
+      const delivered = await recordContinuationResult(sessionID, "success", maxConsecutiveFailures, {
         expectedGoalID: attemptGoalID,
       })
       if (isCurrent() && delivered?.pendingAttempt?.delivered) locallyDeliveredPendingSessions.add(sessionID)
@@ -1965,14 +2001,20 @@ const server: Plugin = async ({ client }, options?: Options) => {
         // A transport failure is a real attempt: count it toward the
         // max_prompt_failures ceiling and schedule a bounded retry at the
         // remaining minimum interval. Keep the reserved autoTurn consumed.
-        const afterFailure = await recordContinuationResult(sessionID, "failure", maxPromptFailures, {
+        const afterFailure = await recordContinuationResult(sessionID, "failure", maxConsecutiveFailures, {
           expectedGoalID: attemptGoalID,
           expectedAttemptID: attemptID,
         })
         if (autoContinue && afterFailure?.status === "active") {
           scheduleSettledContinuation(
             sessionID,
-            continuationRetryDelayMs(minInterval, attemptReservedAt),
+            continuationRetryDelayMs(
+              minInterval,
+              attemptReservedAt,
+              afterFailure?.continuationFailures ?? 0,
+              retryBackoffBaseMs,
+              retryMaxDelayMs,
+            ),
             true,
             "retry",
           )
@@ -2335,14 +2377,20 @@ const server: Plugin = async ({ client }, options?: Options) => {
             if (attempt != null) {
               // The pending attempt failed at the transport level: count one
               // failure and retry at the remaining min interval.
-              const afterFailure = await recordContinuationResult(sessionID, "failure", maxPromptFailures, {
+              const afterFailure = await recordContinuationResult(sessionID, "failure", maxConsecutiveFailures, {
                 requirePending: true,
               })
               if (afterFailure) locallyDeliveredPendingSessions.delete(sessionID)
               if (autoContinue && afterFailure?.status === "active") {
                 scheduleSettledContinuation(
                   sessionID,
-                  continuationRetryDelayMs(minInterval, attempt.reservedAt),
+                  continuationRetryDelayMs(
+                    minInterval,
+                    attempt.reservedAt,
+                    afterFailure?.continuationFailures ?? 0,
+                    retryBackoffBaseMs,
+                    retryMaxDelayMs,
+                  ),
                   true,
                   "retry",
                 )
@@ -2413,7 +2461,14 @@ async function setupV2(context: PluginV2.Plugin.Context): Promise<PluginV2.Plugi
   const maxTaskBlockMs = timeoutMillisecondsFromSeconds(
     options.max_task_block_seconds ?? DEFAULT_MAX_TASK_BLOCK_SECONDS,
   )
-  const maxPromptFailures = positiveIntegerOrNull(options.max_prompt_failures) ?? DEFAULT_MAX_PROMPT_FAILURES
+  // max_consecutive_failures is the explicit name; keep max_prompt_failures as
+  // a backwards-compatible alias for existing configurations.
+  const maxConsecutiveFailures =
+    positiveIntegerOrNull(options.max_consecutive_failures) ??
+    positiveIntegerOrNull(options.max_prompt_failures) ??
+    DEFAULT_MAX_CONSECUTIVE_FAILURES
+  const retryBackoffBaseMs = nonNegativeIntegerOrNull(options.retry_backoff_base_ms) ?? DEFAULT_RETRY_BACKOFF_BASE_MS
+  const retryMaxDelayMs = positiveIntegerOrNull(options.retry_max_delay_ms) ?? DEFAULT_RETRY_MAX_DELAY_MS
   const registerCommand = options.register_command ?? true
   const commandName = commandNameFromOptions(options)
   const locale = resolveLocale(options.locale)
@@ -2556,7 +2611,7 @@ async function setupV2(context: PluginV2.Plugin.Context): Promise<PluginV2.Plugi
       // no-progress budget (armNoProgress: false). The rescue delivers while
       // already busy, so the pending attempt is marked started immediately.
       if (!isCurrent()) return
-      const delivered = await recordContinuationResult(sessionID, "success", maxPromptFailures, {
+      const delivered = await recordContinuationResult(sessionID, "success", maxConsecutiveFailures, {
         armNoProgress: false,
         started: true,
         expectedGoalID: claimedGoalID,
@@ -2571,7 +2626,7 @@ async function setupV2(context: PluginV2.Plugin.Context): Promise<PluginV2.Plugi
           // Watchdog rescues share the same prompt-failure ceiling: recognized
           // transport errors accumulate toward max_prompt_failures without
           // consuming auto-turn budgets.
-          await recordContinuationResult(sessionID, "failure", maxPromptFailures, { expectedGoalID: claimedGoalID })
+          await recordContinuationResult(sessionID, "failure", maxConsecutiveFailures, { expectedGoalID: claimedGoalID })
         }
         v2ErrorLog("Turn watchdog retry failed", error)
       } catch {
@@ -2759,7 +2814,7 @@ async function setupV2(context: PluginV2.Plugin.Context): Promise<PluginV2.Plugi
         if (!pendingReadyForFailure(attempt, deliveredLocally)) {
           return
         }
-        const afterFailure = await recordContinuationResult(sessionID, "failure", maxPromptFailures, {
+        const afterFailure = await recordContinuationResult(sessionID, "failure", maxConsecutiveFailures, {
           requirePending: true,
           expectedGoalID: current.id,
           expectedAttemptID: attempt.id,
@@ -2768,7 +2823,13 @@ async function setupV2(context: PluginV2.Plugin.Context): Promise<PluginV2.Plugi
         if (autoContinue && afterFailure?.status === "active") {
           scheduleSettledContinuation(
             sessionID,
-            continuationRetryDelayMs(minInterval, attempt.reservedAt),
+            continuationRetryDelayMs(
+              minInterval,
+              attempt.reservedAt,
+              afterFailure?.continuationFailures ?? 0,
+              retryBackoffBaseMs,
+              retryMaxDelayMs,
+            ),
             true,
             "retry",
           )
@@ -2824,7 +2885,7 @@ async function setupV2(context: PluginV2.Plugin.Context): Promise<PluginV2.Plugi
       // Delivery succeeded, so commit the attempt even if the timer that
       // started it was canceled while the prompt was in flight. Rolling back
       // here would refund an accepted prompt and allow a duplicate on idle.
-      const delivered = await recordContinuationResult(sessionID, "success", maxPromptFailures, {
+      const delivered = await recordContinuationResult(sessionID, "success", maxConsecutiveFailures, {
         expectedGoalID: attemptGoalID,
       })
       if (isCurrent() && delivered?.pendingAttempt?.delivered) locallyDeliveredPendingSessions.add(sessionID)
@@ -2840,14 +2901,20 @@ async function setupV2(context: PluginV2.Plugin.Context): Promise<PluginV2.Plugi
         return
       }
       if (isTransportError(error)) {
-        const afterFailure = await recordContinuationResult(sessionID, "failure", maxPromptFailures, {
+        const afterFailure = await recordContinuationResult(sessionID, "failure", maxConsecutiveFailures, {
           expectedGoalID: attemptGoalID,
           expectedAttemptID: attemptID,
         })
         if (autoContinue && afterFailure?.status === "active") {
           scheduleSettledContinuation(
             sessionID,
-            continuationRetryDelayMs(minInterval, attemptReservedAt),
+            continuationRetryDelayMs(
+              minInterval,
+              attemptReservedAt,
+              afterFailure?.continuationFailures ?? 0,
+              retryBackoffBaseMs,
+              retryMaxDelayMs,
+            ),
             true,
             "retry",
           )
@@ -3074,14 +3141,20 @@ async function setupV2(context: PluginV2.Plugin.Context): Promise<PluginV2.Plugi
           if (goal?.status === "active") {
             const attempt = pendingAttemptOf(goal)
             if (attempt != null) {
-              const afterFailure = await recordContinuationResult(sessionID, "failure", maxPromptFailures, {
+              const afterFailure = await recordContinuationResult(sessionID, "failure", maxConsecutiveFailures, {
                 requirePending: true,
               })
               if (afterFailure) locallyDeliveredPendingSessions.delete(sessionID)
               if (autoContinue && afterFailure?.status === "active") {
                 scheduleSettledContinuation(
                   sessionID,
-                  continuationRetryDelayMs(minInterval, attempt.reservedAt),
+                  continuationRetryDelayMs(
+                    minInterval,
+                    attempt.reservedAt,
+                    afterFailure?.continuationFailures ?? 0,
+                    retryBackoffBaseMs,
+                    retryMaxDelayMs,
+                  ),
                   true,
                   "retry",
                 )

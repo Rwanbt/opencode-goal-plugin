@@ -1553,7 +1553,7 @@ function maybeStopForUsageLimit(goal, defaultMaxAutoTurns, now = nowSeconds()) {
   if (goal.status !== "active")
     return false;
   const effectiveMaxAutoTurns = goal.maxAutoTurns ?? defaultMaxAutoTurns;
-  if (effectiveMaxAutoTurns > 0 && goal.autoTurns >= effectiveMaxAutoTurns) {
+  if (effectiveMaxAutoTurns != null && effectiveMaxAutoTurns > 0 && goal.autoTurns >= effectiveMaxAutoTurns) {
     goal.status = "usageLimited";
     goal.lastAccountedAt = null;
     goal.stopReason = `${MAX_AUTO_CONTINUES_STOP_REASON_PREFIX}${effectiveMaxAutoTurns})`;
@@ -2315,9 +2315,11 @@ Preserve the goal objective, status, elapsed time, budget usage, latest checkpoi
 }
 
 // src/server.ts
-var DEFAULT_MAX_AUTO_TURNS = 25;
+var DEFAULT_MAX_AUTO_TURNS = null;
 var DEFAULT_CONTINUE_INTERVAL_SECONDS = 3;
-var DEFAULT_MAX_PROMPT_FAILURES = 3;
+var DEFAULT_MAX_CONSECUTIVE_FAILURES = 3;
+var DEFAULT_RETRY_BACKOFF_BASE_MS = 1000;
+var DEFAULT_RETRY_MAX_DELAY_MS = 60000;
 var DEFAULT_COMMAND_NAME = "goal";
 var DEFAULT_RESTRICTED_AGENTS = ["plan"];
 var TASK_SETTLE_DELAY_MS = 25;
@@ -2746,8 +2748,10 @@ function transportErrorMessageFromEvent(props) {
   }
   return "";
 }
-function continuationRetryDelayMs(minIntervalSeconds, attemptAt, now = Date.now()) {
-  return Math.max(0, attemptAt + minIntervalSeconds * 1000 - now) + RETRY_SETTLE_MS;
+function continuationRetryDelayMs(minIntervalSeconds, attemptAt, failureCount = 0, backoffBaseMs = 0, backoffMaxMs = 0, now = Date.now()) {
+  const minDelay = Math.max(0, attemptAt + minIntervalSeconds * 1000 - now);
+  const exponentialDelay = failureCount > 0 && backoffBaseMs > 0 ? Math.min(backoffBaseMs * 2 ** (failureCount - 1), backoffMaxMs > 0 ? backoffMaxMs : Number.POSITIVE_INFINITY) : 0;
+  return Math.max(minDelay, exponentialDelay) + RETRY_SETTLE_MS;
 }
 function continuationDelayFromSnapshot(minIntervalSeconds, lastContinuationAt, now = Date.now()) {
   if (lastContinuationAt == null)
@@ -3477,7 +3481,9 @@ var server = async ({ client }, options) => {
   const minInterval = nonNegativeIntegerOrNull2(options?.min_continue_interval_seconds) ?? DEFAULT_CONTINUE_INTERVAL_SECONDS;
   const maxTurnTimeMs = timeoutMillisecondsFromSeconds(options?.max_turn_time);
   const maxTaskBlockMs = timeoutMillisecondsFromSeconds(options?.max_task_block_seconds ?? DEFAULT_MAX_TASK_BLOCK_SECONDS);
-  const maxPromptFailures = positiveIntegerOrNull2(options?.max_prompt_failures) ?? DEFAULT_MAX_PROMPT_FAILURES;
+  const maxConsecutiveFailures = positiveIntegerOrNull2(options?.max_consecutive_failures) ?? positiveIntegerOrNull2(options?.max_prompt_failures) ?? DEFAULT_MAX_CONSECUTIVE_FAILURES;
+  const retryBackoffBaseMs = nonNegativeIntegerOrNull2(options?.retry_backoff_base_ms) ?? DEFAULT_RETRY_BACKOFF_BASE_MS;
+  const retryMaxDelayMs = positiveIntegerOrNull2(options?.retry_max_delay_ms) ?? DEFAULT_RETRY_MAX_DELAY_MS;
   const registerCommand = options?.register_command ?? true;
   const commandName = commandNameFromOptions(options);
   const locale = resolveLocale(options?.locale);
@@ -3610,7 +3616,7 @@ var server = async ({ client }, options) => {
       await sendContinuation(client, sessionID, continuationPrompt(current, locale), current.lastPromptAgent ?? latestTurnAgent ?? null);
       if (!isCurrent())
         return;
-      const delivered = await recordContinuationResult(sessionID, "success", maxPromptFailures, {
+      const delivered = await recordContinuationResult(sessionID, "success", maxConsecutiveFailures, {
         armNoProgress: false,
         started: true,
         expectedGoalID: claimedGoalID
@@ -3622,7 +3628,7 @@ var server = async ({ client }, options) => {
     } catch (error) {
       try {
         if (claimedContinuation && isCurrent() && isTransportError(error)) {
-          await recordContinuationResult(sessionID, "failure", maxPromptFailures, { expectedGoalID: claimedGoalID });
+          await recordContinuationResult(sessionID, "failure", maxConsecutiveFailures, { expectedGoalID: claimedGoalID });
         }
         await client.app?.log?.({
           body: {
@@ -3798,7 +3804,7 @@ var server = async ({ client }, options) => {
         if (!pendingReadyForFailure(attempt, deliveredLocally)) {
           return;
         }
-        const afterFailure = await recordContinuationResult(sessionID, "failure", maxPromptFailures, {
+        const afterFailure = await recordContinuationResult(sessionID, "failure", maxConsecutiveFailures, {
           requirePending: true,
           expectedGoalID: current.id,
           expectedAttemptID: attempt.id
@@ -3806,7 +3812,7 @@ var server = async ({ client }, options) => {
         if (afterFailure)
           locallyDeliveredPendingSessions.delete(sessionID);
         if (autoContinue && afterFailure?.status === "active") {
-          scheduleSettledContinuation(sessionID, continuationRetryDelayMs(minInterval, attempt.reservedAt), true, "retry");
+          scheduleSettledContinuation(sessionID, continuationRetryDelayMs(minInterval, attempt.reservedAt, afterFailure?.continuationFailures ?? 0, retryBackoffBaseMs, retryMaxDelayMs), true, "retry");
         }
         return;
       }
@@ -3840,7 +3846,7 @@ var server = async ({ client }, options) => {
         await rollbackContinuationAttempt(sessionID, { goalID: attemptGoalID, attemptID });
         return;
       }
-      const delivered = await recordContinuationResult(sessionID, "success", maxPromptFailures, {
+      const delivered = await recordContinuationResult(sessionID, "success", maxConsecutiveFailures, {
         expectedGoalID: attemptGoalID
       });
       if (isCurrent() && delivered?.pendingAttempt?.delivered)
@@ -3854,12 +3860,12 @@ var server = async ({ client }, options) => {
         return;
       }
       if (isTransportError(error)) {
-        const afterFailure = await recordContinuationResult(sessionID, "failure", maxPromptFailures, {
+        const afterFailure = await recordContinuationResult(sessionID, "failure", maxConsecutiveFailures, {
           expectedGoalID: attemptGoalID,
           expectedAttemptID: attemptID
         });
         if (autoContinue && afterFailure?.status === "active") {
-          scheduleSettledContinuation(sessionID, continuationRetryDelayMs(minInterval, attemptReservedAt), true, "retry");
+          scheduleSettledContinuation(sessionID, continuationRetryDelayMs(minInterval, attemptReservedAt, afterFailure?.continuationFailures ?? 0, retryBackoffBaseMs, retryMaxDelayMs), true, "retry");
         }
       } else {
         await rollbackContinuationAttempt(sessionID, { goalID: attemptGoalID, attemptID });
@@ -4195,13 +4201,13 @@ var server = async ({ client }, options) => {
           if (goal?.status === "active") {
             const attempt = pendingAttemptOf(goal);
             if (attempt != null) {
-              const afterFailure = await recordContinuationResult(sessionID, "failure", maxPromptFailures, {
+              const afterFailure = await recordContinuationResult(sessionID, "failure", maxConsecutiveFailures, {
                 requirePending: true
               });
               if (afterFailure)
                 locallyDeliveredPendingSessions.delete(sessionID);
               if (autoContinue && afterFailure?.status === "active") {
-                scheduleSettledContinuation(sessionID, continuationRetryDelayMs(minInterval, attempt.reservedAt), true, "retry");
+                scheduleSettledContinuation(sessionID, continuationRetryDelayMs(minInterval, attempt.reservedAt, afterFailure?.continuationFailures ?? 0, retryBackoffBaseMs, retryMaxDelayMs), true, "retry");
               }
             } else if (autoContinue) {
               scheduleSettledContinuation(sessionID, continuationDelayFromSnapshot(minInterval, goal.lastContinuationAt), false, "recovery");
@@ -4256,7 +4262,9 @@ async function setupV2(context) {
   const minInterval = nonNegativeIntegerOrNull2(options.min_continue_interval_seconds) ?? DEFAULT_CONTINUE_INTERVAL_SECONDS;
   const maxTurnTimeMs = timeoutMillisecondsFromSeconds(options.max_turn_time);
   const maxTaskBlockMs = timeoutMillisecondsFromSeconds(options.max_task_block_seconds ?? DEFAULT_MAX_TASK_BLOCK_SECONDS);
-  const maxPromptFailures = positiveIntegerOrNull2(options.max_prompt_failures) ?? DEFAULT_MAX_PROMPT_FAILURES;
+  const maxConsecutiveFailures = positiveIntegerOrNull2(options.max_consecutive_failures) ?? positiveIntegerOrNull2(options.max_prompt_failures) ?? DEFAULT_MAX_CONSECUTIVE_FAILURES;
+  const retryBackoffBaseMs = nonNegativeIntegerOrNull2(options.retry_backoff_base_ms) ?? DEFAULT_RETRY_BACKOFF_BASE_MS;
+  const retryMaxDelayMs = positiveIntegerOrNull2(options.retry_max_delay_ms) ?? DEFAULT_RETRY_MAX_DELAY_MS;
   const registerCommand = options.register_command ?? true;
   const commandName = commandNameFromOptions(options);
   const locale = resolveLocale(options.locale);
@@ -4403,7 +4411,7 @@ async function setupV2(context) {
       await sendContinuation2(sessionID, continuationPrompt(current, locale), current.lastPromptAgent ?? latestStep?.agent ?? null);
       if (!isCurrent())
         return;
-      const delivered = await recordContinuationResult(sessionID, "success", maxPromptFailures, {
+      const delivered = await recordContinuationResult(sessionID, "success", maxConsecutiveFailures, {
         armNoProgress: false,
         started: true,
         expectedGoalID: claimedGoalID
@@ -4415,7 +4423,7 @@ async function setupV2(context) {
     } catch (error) {
       try {
         if (claimedContinuation && isCurrent() && isTransportError(error)) {
-          await recordContinuationResult(sessionID, "failure", maxPromptFailures, { expectedGoalID: claimedGoalID });
+          await recordContinuationResult(sessionID, "failure", maxConsecutiveFailures, { expectedGoalID: claimedGoalID });
         }
         v2ErrorLog("Turn watchdog retry failed", error);
       } catch {
@@ -4588,7 +4596,7 @@ async function setupV2(context) {
         if (!pendingReadyForFailure(attempt, deliveredLocally)) {
           return;
         }
-        const afterFailure = await recordContinuationResult(sessionID, "failure", maxPromptFailures, {
+        const afterFailure = await recordContinuationResult(sessionID, "failure", maxConsecutiveFailures, {
           requirePending: true,
           expectedGoalID: current.id,
           expectedAttemptID: attempt.id
@@ -4596,7 +4604,7 @@ async function setupV2(context) {
         if (afterFailure)
           locallyDeliveredPendingSessions.delete(sessionID);
         if (autoContinue && afterFailure?.status === "active") {
-          scheduleSettledContinuation(sessionID, continuationRetryDelayMs(minInterval, attempt.reservedAt), true, "retry");
+          scheduleSettledContinuation(sessionID, continuationRetryDelayMs(minInterval, attempt.reservedAt, afterFailure?.continuationFailures ?? 0, retryBackoffBaseMs, retryMaxDelayMs), true, "retry");
         }
         return;
       }
@@ -4634,7 +4642,7 @@ async function setupV2(context) {
         await rollbackContinuationAttempt(sessionID, { goalID: attemptGoalID, attemptID });
         return;
       }
-      const delivered = await recordContinuationResult(sessionID, "success", maxPromptFailures, {
+      const delivered = await recordContinuationResult(sessionID, "success", maxConsecutiveFailures, {
         expectedGoalID: attemptGoalID
       });
       if (isCurrent() && delivered?.pendingAttempt?.delivered)
@@ -4648,12 +4656,12 @@ async function setupV2(context) {
         return;
       }
       if (isTransportError(error)) {
-        const afterFailure = await recordContinuationResult(sessionID, "failure", maxPromptFailures, {
+        const afterFailure = await recordContinuationResult(sessionID, "failure", maxConsecutiveFailures, {
           expectedGoalID: attemptGoalID,
           expectedAttemptID: attemptID
         });
         if (autoContinue && afterFailure?.status === "active") {
-          scheduleSettledContinuation(sessionID, continuationRetryDelayMs(minInterval, attemptReservedAt), true, "retry");
+          scheduleSettledContinuation(sessionID, continuationRetryDelayMs(minInterval, attemptReservedAt, afterFailure?.continuationFailures ?? 0, retryBackoffBaseMs, retryMaxDelayMs), true, "retry");
         }
       } else {
         await rollbackContinuationAttempt(sessionID, { goalID: attemptGoalID, attemptID });
@@ -4836,13 +4844,13 @@ async function setupV2(context) {
           if (goal?.status === "active") {
             const attempt = pendingAttemptOf(goal);
             if (attempt != null) {
-              const afterFailure = await recordContinuationResult(sessionID, "failure", maxPromptFailures, {
+              const afterFailure = await recordContinuationResult(sessionID, "failure", maxConsecutiveFailures, {
                 requirePending: true
               });
               if (afterFailure)
                 locallyDeliveredPendingSessions.delete(sessionID);
               if (autoContinue && afterFailure?.status === "active") {
-                scheduleSettledContinuation(sessionID, continuationRetryDelayMs(minInterval, attempt.reservedAt), true, "retry");
+                scheduleSettledContinuation(sessionID, continuationRetryDelayMs(minInterval, attempt.reservedAt, afterFailure?.continuationFailures ?? 0, retryBackoffBaseMs, retryMaxDelayMs), true, "retry");
               }
             } else if (autoContinue) {
               scheduleSettledContinuation(sessionID, continuationDelayFromSnapshot(minInterval, goal.lastContinuationAt), false, "recovery");

@@ -125,7 +125,6 @@ In OpenCode 1, server options use the package-and-options tuple in `opencode.jso
       {
         "auto_continue": true,
         "defer_while_tasks_active": true,
-        "max_auto_turns": 25,
         "min_continue_interval_seconds": 3,
         "max_turn_time": 300,
         "max_task_block_seconds": 900,
@@ -153,7 +152,6 @@ In OpenCode 2, use the plugin object form instead:
       "package": "@prevalentware/opencode-goal-plugin",
       "options": {
         "auto_continue": true,
-        "max_auto_turns": 25,
         "locale": "zh-CN",
         "default_token_budget": 200000,
         "restricted_agents": ["plan"]
@@ -184,11 +182,14 @@ Defaults:
 - `auto_continue`: `true`
 - `defer_while_tasks_active`: `true`; when enabled, goal auto-continuation waits for active OpenCode Task child sessions and their orchestrator reconciliation before sending the next goal prompt. A deferral re-checks child sessions on a short timer, so a goal deferred by a task never depends on a further idle event to resume.
 - `max_task_block_seconds`: `900`; wall-clock ceiling on how long a single Task child session may defer goal continuation. A child that stays listed but never reports a terminal state, or a terminal child whose result is never reconciled, stops blocking once the ceiling passes. Set a smaller value for shorter subagents, `0` to remove the ceiling, or disable deferral entirely with `defer_while_tasks_active: false`.
-- `max_auto_turns`: `25`; explicitly resuming a goal with `/goal resume` or `/resume_goal` after it reaches this limit starts a fresh auto-turn window. Token usage and elapsed-time usage are preserved.
+- `max_auto_turns`: unset by default (no global cap); set a positive number to limit how many automatic continuations a goal may consume. A per-goal `max_auto_turns` passed to `create_goal` takes precedence. Explicitly resuming a goal with `/goal resume` or `/resume_goal` after it reaches this limit starts a fresh auto-turn window. Token usage and elapsed-time usage are preserved.
 - `min_continue_interval_seconds`: `3`
 - Fast V2 executions that finish inside this interval schedule a delayed continuation; they do not require another user message to wake up.
 - `max_turn_time`: unset by default; set a positive number of seconds to retry one active-goal continuation prompt when a model turn remains busy for that long. Each new busy event resets the watchdog. Idle, built-in retry, session deletion, active Task children, and restricted agents suppress the retry. Watchdog retries are independent of `min_continue_interval_seconds` and never consume auto-turn or no-progress budgets, but recognized transport failures still count toward the `max_prompt_failures` ceiling.
 - `max_prompt_failures`: `3`; consecutive transport or no-response continuation failures pause the goal at this ceiling. Prompt delivery alone does not reset the count; substantive assistant or tool progress, a new goal, or an explicit resume does.
+- `max_consecutive_failures`: `3`; explicit name for the same ceiling. When both are set, `max_consecutive_failures` wins and `max_prompt_failures` remains a backwards-compatible alias.
+- `retry_backoff_base_ms`: `1000`; base delay for exponential backoff between consecutive retry attempts after a failed continuation. Set `0` to disable backoff and retry at `min_continue_interval_seconds` only.
+- `retry_max_delay_ms`: `60000`; upper bound for the exponential retry backoff.
 - `default_token_budget`: unset by default; when set, new goals inherit this token budget.
 - `max_goal_duration_seconds`: unset by default; when set, new goals inherit this elapsed-time safety limit.
 - `no_progress_token_threshold`: `50`; output-token floor used to judge whether a goal continuation turn made progress.

@@ -1403,7 +1403,11 @@ export async function recordAssistantProgress(sessionID: string, input: Assistan
  * (the attempt is a reserved turn); if the attempt is later canceled before it
  * is actually sent, callers must roll it back with rollbackContinuationAttempt.
  */
-export async function reserveContinuation(sessionID: string, maxAutoTurns: number, minIntervalSeconds: number) {
+export async function reserveContinuation(
+  sessionID: string,
+  maxAutoTurns: number | null,
+  minIntervalSeconds: number,
+) {
   return mutate((state) => {
     const goal = state.goals[sessionID]
     if (!goal) return null
@@ -1616,10 +1620,10 @@ function maybeStopForBudget(goal: Goal) {
   pushHistory(goal, "limited", goal.lastStatus)
 }
 
-function maybeStopForUsageLimit(goal: Goal, defaultMaxAutoTurns: number, now = nowSeconds()) {
+function maybeStopForUsageLimit(goal: Goal, defaultMaxAutoTurns: number | null, now = nowSeconds()) {
   if (goal.status !== "active") return false
   const effectiveMaxAutoTurns = goal.maxAutoTurns ?? defaultMaxAutoTurns
-  if (effectiveMaxAutoTurns > 0 && goal.autoTurns >= effectiveMaxAutoTurns) {
+  if (effectiveMaxAutoTurns != null && effectiveMaxAutoTurns > 0 && goal.autoTurns >= effectiveMaxAutoTurns) {
     goal.status = "usageLimited"
     goal.lastAccountedAt = null
     goal.stopReason = `${MAX_AUTO_CONTINUES_STOP_REASON_PREFIX}${effectiveMaxAutoTurns})`

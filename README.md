@@ -1,18 +1,20 @@
-# OpenCode Goal Plugin
+# OpenCode Goal Plugin — Rwanbt fork
 
-[![npm version](https://img.shields.io/npm/v/@prevalentware/opencode-goal-plugin.svg)](https://www.npmjs.com/package/@prevalentware/opencode-goal-plugin)
-[![GitHub repository](https://img.shields.io/badge/GitHub-prevalentWare%2Fopencode--goal--plugin-blue?logo=github)](https://github.com/prevalentWare/opencode-goal-plugin)
+[![GitHub repository](https://img.shields.io/badge/GitHub-Rwanbt%2Fopencode--goal--plugin-blue?logo=github)](https://github.com/Rwanbt/opencode-goal-plugin)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Upstream](https://img.shields.io/badge/upstream-prevalentWare%2Fopencode--goal--plugin-lightgrey?logo=github)](https://github.com/prevalentWare/opencode-goal-plugin)
+
+This repository is a maintained fork of [`prevalentWare/opencode-goal-plugin`](https://github.com/prevalentWare/opencode-goal-plugin). It preserves the upstream goal-mode semantics and adds the long-running autonomy improvements described in [Fork changes](#fork-changes).
 
 OpenCode Goal Plugin adds Codex-style long-running goal mode to OpenCode. It gives AI coding agents a `/goal` slash command, persistent goal state, completion evidence, idle continuation, and a terminal UI goal indicator so an OpenCode session can keep working toward one explicit objective until it is complete, blocked, or cleared.
 
-If you are searching for an OpenCode goal plugin, goal mode for OpenCode, or a way to keep an OpenCode AI coding agent focused on a long-running task, this package is the npm plugin for that workflow.
+If you are searching for an OpenCode goal plugin, goal mode for OpenCode, or a way to keep an OpenCode AI coding agent focused on a long-running task, this plugin implements that workflow.
 
 Links:
 
-- npm package: [`@prevalentware/opencode-goal-plugin`](https://www.npmjs.com/package/@prevalentware/opencode-goal-plugin)
-- GitHub repository: [`prevalentWare/opencode-goal-plugin`](https://github.com/prevalentWare/opencode-goal-plugin)
-- OpenCode 1 global install: `opencode plugin -g @prevalentware/opencode-goal-plugin`
+- This fork: [`Rwanbt/opencode-goal-plugin`](https://github.com/Rwanbt/opencode-goal-plugin)
+- Upstream repository: [`prevalentWare/opencode-goal-plugin`](https://github.com/prevalentWare/opencode-goal-plugin)
+- Upstream npm package: [`@prevalentware/opencode-goal-plugin`](https://www.npmjs.com/package/@prevalentware/opencode-goal-plugin)
 
 The OpenCode Goal Plugin adds:
 
@@ -20,10 +22,24 @@ The OpenCode Goal Plugin adds:
 - A sidebar goal indicator with status, elapsed time, and objective.
 - Agent tools: `get_goal`, `get_goal_history`, `list_all_goals`, `create_goal`, `set_goal`, `update_goal_objective`, `update_goal_status`, `update_goal`, `stop_goal`, `replace_goal`, `update_goal_plan`, and `clear_goal`.
 - Goal close evidence: `complete` requires verified evidence, and `unmet` requires a concrete blocker.
-- Persistent per-session goal state with history, checkpoints, budgets, and owner-only file permissions.
-- Optional automatic continuation on `session.idle` / `session.status`, with no-progress pause and budget wrap-up safeguards.
+- Persistent per-session goal state with history, checkpoints, optional budgets, and owner-only file permissions.
+- Optional automatic continuation on `session.idle` / `session.status`, with no-progress pause and optional budget wrap-up safeguards.
 - Plan-mode safety: goals created from the `plan` agent stay paused, and auto-continue never escapes a Plan-mode session or switches agents on its own.
 - Compaction context so active goals are preserved when OpenCode summarizes a long session.
+
+## Fork changes
+
+This fork focuses on unattended, long-horizon work. It differs from upstream in the following ways:
+
+| Change | Behaviour |
+| --- | --- |
+| Unlimited auto-turns by default | `max_auto_turns` defaults to `null`. A goal is not stopped after 25 continuations; opt in per goal or per plugin only if you want a cap. |
+| Token budgets are operator-controlled | Set `allow_token_budget` to `false` to ignore both `token_budget` and `default_token_budget`, so a goal runs without a token ceiling. The code default remains `true` for upstream compatibility; the reference profile disables budgets explicitly. |
+| Consecutive-failure ceiling | `max_consecutive_failures` (alias `max_prompt_failures`) bounds transport or no-response failures before pausing. |
+| Exponential retry backoff | `retry_backoff_base_ms` and `retry_max_delay_ms` space retries after failures instead of retrying at a fixed cadence. |
+| OpenCode 2 local entrypoints | Local installs need root `server.js` and `tui.js` files. OpenCode 2 resolves `<directory>/server` and `<directory>/tui` for local paths and does not consult the package `exports` map. |
+| Windows atomic-write hardening | State renames retry up to 5 times with exponential backoff (20/40/80/160 ms) on transient `EPERM`/`EACCES`/`EBUSY`. |
+| Windows test stabilisation | The state-quarantine assertion is path-portable and the TUI test helper uses the production atomic writer. |
 
 ## Why Use This OpenCode Goal Plugin?
 
@@ -37,6 +53,76 @@ Common use cases:
 - Preserve the current goal when OpenCode summarizes or compacts a long conversation.
 
 ## Install
+
+### This fork — OpenCode 2 local install
+
+This fork is installed from a local directory. Build it once, copy it to a stable location, then reference that directory from both OpenCode 2 plugin lists.
+
+```bash
+git clone https://github.com/Rwanbt/opencode-goal-plugin.git
+cd opencode-goal-plugin
+bun install
+bun run build
+```
+
+Copy the whole directory to a permanent location, including `node_modules`, `dist`, `src`, `package.json`, `server.js`, and `tui.js`. For example:
+
+```text
+C:/opencode-plugins/opencode-goal-plugin-rwanbt
+```
+
+The root `server.js` and `tui.js` files are required. OpenCode 2 resolves local plugins by probing `<directory>/server` and `<directory>/tui`; it does not consult the package `exports` map for local paths.
+
+Server configuration (`~/.config/opencode/opencode.jsonc`; on Windows: `%USERPROFILE%\\.config\\opencode\\opencode.jsonc`):
+
+```jsonc
+{
+  "plugins": [
+    {
+      "package": "C:/opencode-plugins/opencode-goal-plugin-rwanbt",
+      "options": {
+        "auto_continue": true,
+        "defer_while_tasks_active": true,
+        "min_continue_interval_seconds": 3,
+        "allow_token_budget": false,
+        "max_consecutive_failures": 10,
+        "retry_backoff_base_ms": 1000,
+        "retry_max_delay_ms": 60000,
+        "max_no_progress_turns": 10,
+        "max_task_block_seconds": 3600
+      }
+    }
+  ]
+}
+```
+
+TUI configuration (`~/.config/opencode/cli.json`):
+
+```json
+{
+  "plugins": ["C:/opencode-plugins/opencode-goal-plugin-rwanbt"]
+}
+```
+
+OpenCode 1 legacy TUI configuration (`tui.json`), if you still run V1:
+
+```json
+{
+  "plugin": ["C:/opencode-plugins/opencode-goal-plugin-rwanbt"]
+}
+```
+
+After changing the configuration, restart OpenCode (`opencode service restart` for the background server) and verify the plugin is active:
+
+```bash
+opencode plugin list
+```
+
+The list should include `local.goal-mode.server` with a local source path.
+
+### Upstream npm package (reference)
+
+The instructions below install the upstream npm package, not this fork. They are kept for reference and for users who intentionally want the published upstream build.
 
 Choose the instructions that match the CLI you run:
 
@@ -126,37 +212,19 @@ In OpenCode 1, server options use the package-and-options tuple in `opencode.jso
         "auto_continue": true,
         "defer_while_tasks_active": true,
         "min_continue_interval_seconds": 3,
-        "max_turn_time": 300,
-        "max_task_block_seconds": 900,
-        "max_prompt_failures": 3,
-        "locale": "zh-CN",
-        "default_token_budget": 200000,
-        "max_goal_duration_seconds": 1800,
+        "max_task_block_seconds": 3600,
+        "allow_token_budget": false,
+        "max_consecutive_failures": 10,
+        "retry_backoff_base_ms": 1000,
+        "retry_max_delay_ms": 60000,
         "no_progress_token_threshold": 50,
-        "max_no_progress_turns": 2,
+        "max_no_progress_turns": 10,
+        "locale": "en",
         "restricted_agents": ["plan"],
         "allow_goal_execution_from_plan": false,
         "max_objective_chars": 100000
       }
     ]
-  ]
-}
-```
-
-In OpenCode 2, use the plugin object form instead:
-
-```json
-{
-  "plugins": [
-    {
-      "package": "@prevalentware/opencode-goal-plugin",
-      "options": {
-        "auto_continue": true,
-        "locale": "zh-CN",
-        "default_token_budget": 200000,
-        "restricted_agents": ["plan"]
-      }
-    }
   ]
 }
 ```
@@ -176,6 +244,53 @@ option in `tui.json`:
   ]
 }
 ```
+
+In OpenCode 2, use the plugin object form instead:
+
+```json
+{
+  "plugins": [
+    {
+      "package": "@prevalentware/opencode-goal-plugin",
+      "options": {
+        "auto_continue": true,
+        "allow_token_budget": false,
+        "max_consecutive_failures": 10,
+        "max_no_progress_turns": 10
+      }
+    }
+  ]
+}
+```
+
+### Recommended profile for 24 h+ autonomous goals
+
+For unattended work that must survive compactions and long provider sessions, use:
+
+```json
+{
+  "auto_continue": true,
+  "defer_while_tasks_active": true,
+  "min_continue_interval_seconds": 3,
+  "allow_token_budget": false,
+  "max_consecutive_failures": 10,
+  "retry_backoff_base_ms": 1000,
+  "retry_max_delay_ms": 60000,
+  "max_no_progress_turns": 10,
+  "max_task_block_seconds": 3600
+}
+```
+
+Do not set `max_auto_turns`, `default_token_budget`, or `max_goal_duration_seconds` unless you intentionally want the corresponding ceiling.
+
+With this profile, a goal keeps running until:
+
+- the objective is completed or explicitly stopped;
+- 10 consecutive transport or no-response failures occur;
+- 10 consecutive continuation turns produce fewer than 50 output tokens;
+- or the OpenCode session is terminated externally.
+
+Compactions do not end the goal: the plugin injects the goal context into the compaction and resumes continuation afterward.
 
 Defaults:
 
@@ -227,8 +342,8 @@ The `update_goal` tool can close a goal in two ways:
 
 The plugin also uses safety states while keeping the goal available for review or resume:
 
-- `budgetLimited` when a token budget is exhausted.
-- `usageLimited` when an auto-turn or elapsed-time budget is exhausted.
+- `budgetLimited` when a token budget is exhausted. Token budgets are disabled when `allow_token_budget` is `false`; in that mode this state is never entered.
+- `usageLimited` when an explicit auto-turn cap or an elapsed-time limit is exhausted.
 - `paused` when the user pauses, auto-continue repeatedly fails, or repeated low-progress goal continuation turns are detected. No-progress accounting is scoped to goal continuation turns: each reserved continuation is evaluated once, when its turn completes, and unrelated assistant activity in the session never pauses the goal.
 
 When a safety limit is reached, the plugin sends one wrap-up prompt asking for a concise handoff instead of silently continuing forever.
@@ -277,6 +392,8 @@ If a non-empty state file contains only whitespace, a UTF-8 BOM, or NUL bytes af
 
 This plugin follows Codex's native goal-mode semantics where OpenCode plugin hooks allow it. Several hardening ideas were adapted from William Ricchiuti's [`willytop8/OpenCode-goal-plugin`](https://github.com/willytop8/OpenCode-goal-plugin), especially lifecycle history, checkpoints, no-progress safeguards, budget wrap-up behavior, and strict-provider-safe system prompt merging. Thank you, William.
 
+This repository is maintained as the Rwanbt fork. Upstream design, documentation, and credits remain with the original authors at `prevalentWare/opencode-goal-plugin`.
+
 ## Development
 
 ```bash
@@ -299,33 +416,43 @@ server. Use `OPENCODE_V2_BIN` to select another V2 binary, or run
 `bun run smoke:v2 @prevalentware/opencode-goal-plugin@<version>` to install and
 verify an exact published package in the isolated environment.
 
-## Publishing
+## Release and local deployment
 
-This package is set up for npm Trusted Publishing from GitHub Actions. On every push to `main`, CI runs typecheck, lint, and unit tests in parallel. If they all pass, the publish job computes the next patch version from the latest version on npm, builds the package, and runs `npm publish`.
+This fork is intended to be built and installed locally; it is not published to npm under the upstream package name. The reproducible build is:
 
-Before the first automated publish, configure the package on npm:
+```bash
+bun install
+bun run lint
+bun run typecheck
+bun run test
+bun run build
+```
 
-1. Open the package settings on npmjs.com.
-2. Add a Trusted Publisher for GitHub Actions.
-3. Use repository `prevalentWare/opencode-goal-plugin`.
-4. Use workflow file `publish.yml`.
+Copy `dist/`, `src/`, `package.json`, `server.js`, `tui.js`, `README.md`, `LICENSE`, and `node_modules/` to your local plugin directory, then restart OpenCode and verify with `opencode plugin list`.
 
-The repository must be public for npm provenance to be generated automatically.
+Upstream publishes `@prevalentware/opencode-goal-plugin` with npm Trusted Publishing from `prevalentWare/opencode-goal-plugin` (workflow `publish.yml`). Do not reuse that package name for a fork build.
 
 ## Notes
 
-OpenCode plugin modules are target-specific. This package exports separate modules for server hooks/tools and TUI UI:
+OpenCode plugin modules are target-specific. This package exports separate modules for server hooks/tools and TUI UI, plus a root entrypoint:
 
 ```json
 {
+  "main": "./dist/server.js",
+  "module": "./dist/server.js",
   "exports": {
-    "./server": "./dist/server.js",
-    "./tui": "./src/tui.ts"
+    ".": { "import": "./dist/server.js" },
+    "./server": { "import": "./dist/server.js" },
+    "./tui": { "import": "./src/tui.ts" }
   }
 }
 ```
 
+Local OpenCode 2 installs also require the root `server.js` and `tui.js` re-export files. OpenCode 2 resolves local plugins by probing `<directory>/server` and `<directory>/tui`; the package `exports` map is used for npm package installs. Both root files are included in this repository and in the package `files` list.
+
 Codex goal mode has deeper runtime integration for thread lifecycle control. This plugin implements the same workflow using OpenCode plugin hooks. Token usage is read from OpenCode step-finish usage when available and falls back to message token metadata or text estimation when exact usage is unavailable. Continuation is driven by V2 `session.execution.succeeded` events and legacy `session.idle` / `session.status` idle notifications, never by intermediate model-step completion. V2 execution starts arm busy tracking; native `session.retry.scheduled` events cancel plugin recovery while OpenCode retries. Terminal execution transport failures use bounded recovery. A V2 `session.execution.interrupted` event with reason `user`, or a V1 session/assistant `MessageAbortedError`, persists a terminal `cancelled` state for an active goal and invalidates timers and outstanding continuation preparation without charging a prompt failure. A later idle, unrelated prompt, or plugin reload cannot resume that goal; start an explicitly requested new goal with `/goal <objective>` or `/goal replace <objective>`. Cancelling a manual turn preserves paused or limited goals. V2 shutdown, superseded, and other interruptions only suppress local continuation until the host starts another execution; they do not cancel the persisted goal. V1 exposes only `MessageAbortedError`, so it cannot distinguish user cancellation from other host aborts of an active goal. Use `/pause_goal` for a durable, resumable pause. Each V2 plugin instance handles goal events only for its own location while still observing cross-location child task lifecycles. The optional `max_turn_time` watchdog can retry one goal continuation prompt when a model turn remains busy, without consuming the goal's auto-turn or no-progress budgets; recognized transport failures do count toward the prompt-failure ceiling. By default, continuation is deferred while OpenCode Task child sessions are active or their terminal result still needs an orchestrator turn, bounded by the `max_task_block_seconds` ceiling so an unobservable child cannot stall a goal indefinitely. During compaction on OpenCode 1, the plugin disables OpenCode's generic synthetic auto-continue while an active goal exists so the goal-specific continuation prompt remains authoritative; on OpenCode 2, compaction runs inside the session's execution flow, so the plugin instead injects the goal snapshot through the `session.compaction` hook where the host provides it.
+
+Token usage is still recorded and displayed when `allow_token_budget` is `false`; the budget is simply never enforced.
 
 The goal sidebar shows the current status, elapsed time, token usage, auto-continue count, latest checkpoint, latest status message, stop reason, and objective when a goal is active, paused, or safety-limited. It checks the shared goal state file every second so usage and checkpoints stay current during a long run. Closed goals remain visible briefly through the latest tool state as achieved or unmet.
 

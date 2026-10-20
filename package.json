@@ -28,7 +28,12 @@
   "license": "MIT",
   "author": "Prevalentware",
   "type": "module",
+  "main": "./dist/server.js",
+  "module": "./dist/server.js",
   "exports": {
+    ".": {
+      "import": "./dist/server.js"
+    },
     "./server": {
       "import": "./dist/server.js"
     },
@@ -38,6 +43,8 @@
   },
   "files": [
     "dist",
+    "server.js",
+    "tui.js",
     "src/tui.ts",
     "src/i18n.ts",
     "src/state-path.ts",
